@@ -1,2 +1,3 @@
 #!/bin/sh
-gcc src/*.c -Wall -O2 -s -o bin/main $(pkg-config --libs x11 xext libpng)
+mkdir -p bin
+gcc src/*.c -Wall -O2 -s -o bin/xpic $(pkg-config --libs x11 xext libpng)
