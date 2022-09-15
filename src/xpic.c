@@ -5,6 +5,7 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <X11/extensions/XShm.h>
+#include <X11/extensions/Xcomposite.h>
 
 #include <png.h>
 
@@ -111,12 +112,81 @@ static int uninit_shm(Display *dpy, XShmSegmentInfo *shm_ctx, XImage *img) {
     return 0;
 }
 
+struct ScreenshotContext {
+    Display *dpy;
+    unsigned int window;
+    char *output_file;
+};
+typedef struct ScreenshotContext ScreenshotContext;
+
+typedef int (*TakeScreenshotFunction)(ScreenshotContext *);
+
+static int take_window_screenshot_xshm(ScreenshotContext *ctx) {
+    _Region sr = {0};
+    {
+        Window root;
+        XGetGeometry(ctx->dpy, ctx->window, &root, &sr.x, &sr.y, &sr.w, &sr.h,
+                &sr.b, &sr.d);
+    }
+
+    XShmSegmentInfo shm_ctx = {0};
+    XImage *img;
+    if (init_shm(ctx->dpy, &shm_ctx, &img, sr) == -1) {
+        return -1;
+    };
+
+    XShmGetImage(ctx->dpy, ctx->window, img, 0, 0, AllPlanes);
+    unsigned int * p = (unsigned int *) img->data;
+    for (int y = 0 ; y < img->height; ++y) {
+        for (int x = 0; x < img->width; ++x) {
+            *p++ |= 0xff000000;
+        }
+    }
+
+    save_as_png(img, ctx->output_file);
+    uninit_shm(ctx->dpy, &shm_ctx, img);
+
+    return 0;
+}
+
+static int take_window_screenshot_composite(ScreenshotContext *ctx) {
+    if (ctx->window != DefaultRootWindow(ctx->dpy)) { 
+        XCompositeRedirectWindow(ctx->dpy, ctx->window, CompositeRedirectAutomatic);
+        Pixmap p = XCompositeNameWindowPixmap(ctx->dpy, ctx->window);
+        ctx->window = p;
+    }
+    return take_window_screenshot_xshm(ctx);
+}
+
+static int check_xcomposite(Display *dpy) {
+    int c_events;
+    int c_errors;
+    if (!XCompositeQueryExtension(dpy, &c_events, &c_errors)) {
+        error("X Composite Extension is not available\n");
+        return -1;
+    }
+
+    int c_major;
+    int c_minor; 
+    if (!XCompositeQueryVersion(dpy, &c_major, &c_minor) || (c_minor < 2 && c_major == 0)) {
+        error("X Composite Extension has a non compatible version\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+
 int main(int argc, char **argv) {
     // Force to use x11
     setenv("GDK_BACKEND", "x11", 1);
 
-    int use_default_filename = 1;
     char output_file[FILENAME_MAX] = {0};
+
+    ScreenshotContext ctx = {0};
+    ctx.output_file = output_file;
+
+    int use_default_filename = 1;
     {
         int opt;
         while ((opt = getopt(argc, argv, "o:")) != -1) {
@@ -137,7 +207,6 @@ int main(int argc, char **argv) {
         errno = 0;
         unsigned int window = strtoul(argv[i], NULL, 0);
         if (errno != 0) {
-            fprintf(stdout, "window is %u", window);
             error("bad argument %s: %s\n", argv[i], strerror(errno));
             return -1;
         }
@@ -149,45 +218,29 @@ int main(int argc, char **argv) {
         error("failed to open display %s\n");
         return -1;
     }
+    ctx.dpy = dpy;
 
     if (!XShmQueryExtension(dpy)) {
         error("X Shared Memory Extension is not available\n");
         return -1;
     }
 
-    {
-        int i = 0;
-        unsigned int window = windows[i];
-        while (window != 0) {
-            _Region sr;
-            {
-                Window root;
-                XGetGeometry(dpy, window, &root, &sr.x, &sr.y, &sr.w, &sr.h,
-                        &sr.b, &sr.d);
-            }
+    TakeScreenshotFunction take_screenshot = 0;
+    if (!check_xcomposite(dpy)) {
+        take_screenshot = &take_window_screenshot_composite;
+    } else {
+        fprintf(stdout, "falling back to XShm\n");
+        take_screenshot = &take_window_screenshot_xshm;
+    }
 
-            XShmSegmentInfo shm_ctx = {0};
-            XImage *img;
-            if (init_shm(dpy, &shm_ctx, &img, sr) == -1) {
-                return -1;
-            };
-
-            XShmGetImage(dpy, window, img, 0, 0, AllPlanes);
-            unsigned int * p = (unsigned int *) img->data;
-            for (int y = 0 ; y < img->height; ++y) {
-                for (int x = 0; x < img->width; ++x) {
-                    *p++ |= 0xff000000;
-                }
-            }
-
-            if (use_default_filename) {
-                get_default_file_name(output_file, argv[i+optind], ".png");
-            }
-            save_as_png(img, output_file);
-
-            uninit_shm(dpy, &shm_ctx, img);
-            window = windows[++i];
+    int i = 0;
+    ctx.window = windows[i];
+    while (ctx.window != 0) {
+        if (use_default_filename) {
+            get_default_file_name(output_file, argv[i+optind], ".png");
         }
+        take_screenshot(&ctx);
+        ctx.window = windows[++i];
     }
 
     XFlush(dpy);
