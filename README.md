@@ -6,6 +6,7 @@ Build requirements
  - libx11   
  - libXext
  - libpng
+ - libxcomposite
 
 Compile from source
 ---
